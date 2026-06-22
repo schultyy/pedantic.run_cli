@@ -66,6 +66,9 @@ func (m model) Init() tea.Cmd {
 
 func runQueryCommand(query string) tea.Cmd {
 	return func() tea.Msg {
+		if query == "" {
+			return queryResultMsg{results: nil, err: nil}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		results, err := RunPromQl(ctx, query)
@@ -127,7 +130,7 @@ func (m model) View() tea.View {
 	} else if res := m.resultsView(); res != "" {
 		sections = append(sections, res)
 	}
-	sections = append(sections, "\n(ctrl+enter to run · ctrl+c to quit)")
+	sections = append(sections, "\n(ctrl+enter to run · ctrl+backspace to reset editor · ctrl+c to quit)")
 
 	f := strings.Repeat("\n", gap) + strings.Join(sections, "\n")
 
