@@ -36,3 +36,4 @@ go.work.sum
 # OS files
 .DS_Store
 Thumbs.db
+pedantic.run_cli

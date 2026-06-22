@@ -1,112 +1,132 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"os"
+	"log"
+	"strings"
+	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-// These imports will be used later in the tutorial. If you save the file
-// now, Go might complain they are unused, but that's fine.
-// You may also need to run `go mod tidy` to download bubbletea and its
-// dependencies.
-type model struct {
-	choices  []string         // items on the to-do list
-	cursor   int              // which to-do list item our cursor is pointing at
-	selected map[int]struct{} // which to-do items are selected
-}
+var docStyle = lipgloss.NewStyle().Margin(1, 2)
 
-func initialModel() model {
-	return model{
-		// Our to-do list is a grocery list
-		choices: []string{"Buy carrots", "Buy celery", "Buy kohlrabi"},
-
-		// A map which indicates which choices are selected. We're using
-		// the  map like a mathematical set. The keys refer to the indexes
-		// of the `choices` slice, above.
-		selected: make(map[int]struct{}),
-	}
-}
-func (m model) Init() tea.Cmd {
-	// Just return `nil`, which means "no I/O right now, please."
-	return nil
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-
-	// Is it a key press?
-	case tea.KeyPressMsg:
-
-		// Cool, what was the actual key pressed?
-		switch msg.String() {
-
-		// These keys should exit the program.
-		case "ctrl+c", "q":
-			return m, tea.Quit
-
-		// The "up" and "k" keys move the cursor up
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-
-		// The "down" and "j" keys move the cursor down
-		case "down", "j":
-			if m.cursor < len(m.choices)-1 {
-				m.cursor++
-			}
-
-		// The "enter" key and the space bar toggle the selected state
-		// for the item that the cursor is pointing at.
-		case "enter", "space":
-			_, ok := m.selected[m.cursor]
-			if ok {
-				delete(m.selected, m.cursor)
-			} else {
-				m.selected[m.cursor] = struct{}{}
-			}
-		}
-	}
-
-	// Return the updated model to the Bubble Tea runtime for processing.
-	// Note that we're not returning a command.
-	return m, nil
-}
-func (m model) View() tea.View {
-	// The header
-	s := "What should we buy at the market?\n\n"
-
-	// Iterate over our choices
-	for i, choice := range m.choices {
-
-		// Is the cursor pointing at this choice?
-		cursor := " " // no cursor
-		if m.cursor == i {
-			cursor = ">" // cursor!
-		}
-
-		// Is this choice selected?
-		checked := " " // not selected
-		if _, ok := m.selected[i]; ok {
-			checked = "x" // selected!
-		}
-
-		// Render the row
-		s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
-	}
-
-	// The footer
-	s += "\nPress q to quit.\n"
-
-	// Send the UI for rendering
-	return tea.NewView(s)
-}
 func main() {
 	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Alas, there's been an error: %v", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
+}
+
+type model struct {
+	textarea textarea.Model
+	results  *PromQLResults
+	err      error
+}
+
+func initialModel() model {
+	ti := textarea.New()
+	ti.Placeholder = "up{host=\"foo\"}"
+	ti.ShowLineNumbers = true
+	ti.DynamicHeight = true
+	ti.MinHeight = 3
+	ti.MaxHeight = 15
+	ti.MaxContentHeight = 20
+	ti.SetWidth(60)
+	ti.SetVirtualCursor(false)
+	ti.Focus()
+
+	return model{textarea: ti}
+}
+
+type queryResultMsg struct {
+	results *PromQLResults
+	err     error
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(textarea.Blink, tea.RequestBackgroundColor)
+}
+
+func runQueryCommand(query string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		results, err := RunPromQl(ctx, query)
+		return queryResultMsg{results: results, err: err}
+	}
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		m.textarea.SetStyles(textarea.DefaultStyles(msg.IsDark()))
+	case queryResultMsg:
+		// Check the error before touching results — on the error path
+		// results is nil.
+		if msg.err != nil {
+			m.err = msg.err
+			m.results = nil
+		} else {
+			m.err = nil
+			m.results = msg.results
+		}
+		return m, nil
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "ctrl+enter":
+			return m, runQueryCommand(m.textarea.Value())
+		case "ctrl+c":
+			return m, tea.Quit
+		}
+	}
+
+	m.textarea, cmd = m.textarea.Update(msg)
+	cmds = append(cmds, cmd)
+	return m, tea.Batch(cmds...)
+}
+
+func (m model) statusView() string {
+	if m.err != nil {
+		return fmt.Sprintf("Encountered error while running query: %s", m.err)
+	}
+	return fmt.Sprintf(
+		"\nHeight: %d · Lines: %d · Cursor: (%d, %d) · Scroll: %.0f%%",
+		m.textarea.Height(),
+		m.textarea.LineCount(),
+		m.textarea.Line(),
+		m.textarea.Column(),
+		m.textarea.ScrollPercent()*100,
+	)
+}
+
+func (m model) View() tea.View {
+	const gap = 1
+
+	var c *tea.Cursor
+	if !m.textarea.VirtualCursor() {
+		c = m.textarea.Cursor()
+		c.Y += gap
+	}
+
+	sections := []string{
+		m.textarea.View(),
+		m.statusView(),
+	}
+	if res := m.resultsView(); res != "" {
+		sections = append(sections, res)
+	}
+	sections = append(sections, "\n(ctrl+enter to run · ctrl+c to quit)")
+
+	f := strings.Repeat("\n", gap) + strings.Join(sections, "\n")
+
+	v := tea.NewView(f)
+	v.Cursor = c
+	return v
 }
