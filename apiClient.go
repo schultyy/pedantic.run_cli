@@ -5,12 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"runtime"
+	"strings"
 	"time"
 )
 
 // baseURL is the pedantic.run PromQL analysis endpoint.
 const baseURL = "https://pedantic.run/api/promql/analyze"
+
+// userAgent identifies this CLI (and its version) to the backend so requests
+// from the TUI can be distinguished from the web app and other clients.
+// `version` is set at build time via -ldflags (see main.go).
+func userAgent() string {
+	return fmt.Sprintf("pedantic-run-cli/%s (%s; %s)", version, runtime.GOOS, runtime.GOARCH)
+}
 
 // Payload is the JSON body we POST to pedantic.run.
 type Payload struct {
@@ -43,12 +53,52 @@ type Code struct {
 	Description string `json:"description"`
 }
 
+// APIError is a non-2xx response from pedantic.run. The server returns
+// `{"error": "..."}` for 400 (empty query) and 422 (could not analyze), which
+// we surface as Message so the UI can show something human instead of a raw
+// status line.
+type APIError struct {
+	StatusCode int
+	Status     string // e.g. "422 Unprocessable Entity"
+	Message    string // parsed from the {"error": ...} body, if present
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("pedantic.run %s: %s", e.Status, e.Message)
+	}
+	return fmt.Sprintf("pedantic.run returned %s", e.Status)
+}
+
+// parseErrorBody pulls a human message out of an error response, handling both
+// the analyzer's own `{"error": "..."}` shape and Phoenix's default
+// `{"errors": {"detail": "..."}}` (returned for 500s and the like). Falls back
+// to the raw trimmed body when neither matches.
+func parseErrorBody(body []byte) string {
+	var single struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &single) == nil && single.Error != "" {
+		return single.Error
+	}
+
+	var nested struct {
+		Errors struct {
+			Detail string `json:"detail"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &nested) == nil && nested.Errors.Detail != "" {
+		return nested.Errors.Detail
+	}
+
+	return strings.TrimSpace(string(body))
+}
+
 // httpClient is shared and reused across requests (connection pooling).
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
-// RunPromQl POSTs a PromQL query to pedantic.run and returns the raw
-// response body. Swap the []byte return for a typed struct once the
-// response shape is known.
+// RunPromQl POSTs a PromQL query to pedantic.run and returns the parsed
+// analysis. A non-2xx response comes back as *APIError.
 func RunPromQl(ctx context.Context, query string) (*PromQLResults, error) {
 	data, err := json.Marshal(Payload{Query: query})
 	if err != nil {
@@ -61,6 +111,7 @@ func RunPromQl(ctx context.Context, query string) (*PromQLResults, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent())
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -69,7 +120,12 @@ func RunPromQl(ctx context.Context, query string) (*PromQLResults, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("pedantic.run returned %s: %s", resp.Status, resp.Body)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Message:    parseErrorBody(body),
+		}
 	}
 
 	var out PromQLResults

@@ -51,6 +51,20 @@ Download a prebuilt binary from the [releases page](https://github.com/schultyy/
 go install github.com/schultyy/pedantic.run_cli@latest
 ```
 
+### macOS: "cannot be opened because the developer cannot be verified"
+
+The release binaries aren't signed/notarized by Apple, so macOS Gatekeeper
+quarantines anything downloaded from the internet and offers to move it to the
+Trash. Clear the quarantine flag after installing and it will run normally:
+
+```sh
+xattr -d com.apple.quarantine /usr/local/bin/pedantic
+```
+
+(Adjust the path if you installed it elsewhere.) Building from source with
+`go install` avoids this entirely, since the binary is compiled locally and
+never quarantined.
+
 ## Usage
 
 ```sh

@@ -27,7 +27,24 @@ func TestRenderExpensiveQueries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query %q failed: %v", q, err)
 		}
-		m := model{results: res}
+		m := model{results: res, width: 90}
 		t.Logf("\n=== %s ===\n%s", q, m.resultsView())
 	}
+}
+
+// TestRenderError exercises the styled error box against a query the analyzer
+// rejects (HTTP 422).
+func TestRenderError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hits the live pedantic.run endpoint; skipped in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := RunPromQl(ctx, "this is not promql {{{")
+	if err == nil {
+		t.Fatal("expected an error for an invalid query")
+	}
+	m := model{err: err, width: 90}
+	t.Logf("\nerr type: %T\n%s", err, m.errorView())
 }

@@ -37,6 +37,7 @@ type model struct {
 	textarea textarea.Model
 	results  *PromQLResults
 	err      error
+	width    int
 }
 
 func initialModel() model {
@@ -47,7 +48,7 @@ func initialModel() model {
 	ti.MinHeight = 3
 	ti.MaxHeight = 15
 	ti.MaxContentHeight = 20
-	ti.SetWidth(60)
+	ti.SetWidth(1000)
 	ti.SetVirtualCursor(false)
 	ti.Focus()
 
@@ -77,6 +78,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 	case tea.BackgroundColorMsg:
 		m.textarea.SetStyles(textarea.DefaultStyles(msg.IsDark()))
 	case queryResultMsg:
@@ -104,20 +107,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m model) statusView() string {
-	if m.err != nil {
-		return fmt.Sprintf("Encountered error while running query: %s", m.err)
-	}
-	return fmt.Sprintf(
-		"\nHeight: %d · Lines: %d · Cursor: (%d, %d) · Scroll: %.0f%%",
-		m.textarea.Height(),
-		m.textarea.LineCount(),
-		m.textarea.Line(),
-		m.textarea.Column(),
-		m.textarea.ScrollPercent()*100,
-	)
-}
-
 func (m model) View() tea.View {
 	const gap = 1
 
@@ -129,9 +118,10 @@ func (m model) View() tea.View {
 
 	sections := []string{
 		m.textarea.View(),
-		m.statusView(),
 	}
-	if res := m.resultsView(); res != "" {
+	if m.err != nil {
+		sections = append(sections, m.errorView())
+	} else if res := m.resultsView(); res != "" {
 		sections = append(sections, res)
 	}
 	sections = append(sections, "\n(ctrl+enter to run · ctrl+c to quit)")

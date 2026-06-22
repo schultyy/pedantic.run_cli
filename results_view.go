@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"sort"
@@ -9,8 +11,8 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Verdicts ordered most→least expensive. Drives both the summary order and the
-// sort of the findings list, so the costly stuff is always on top.
+// Verdicts ordered most→least expensive. Drives the summary order, the sort of
+// the findings list, and which verdict "wins" when highlighted spans overlap.
 var verdictOrder = []string{"invalid", "slow", "moderate", "runtime_dependent", "fast"}
 
 var verdictSeverity = map[string]int{
@@ -30,11 +32,12 @@ var verdictColor = map[string]string{
 }
 
 var (
-	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f7f7f"))
-	descStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9a9a9a"))
-	headStyle = lipgloss.NewStyle().Bold(true)
-	codeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d7d7d7"))
-	okStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#98c379")).Bold(true)
+	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f7f7f"))
+	descStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#9a9a9a"))
+	headStyle  = lipgloss.NewStyle().Bold(true)
+	codeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#d7d7d7"))
+	plainStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8a8a8a"))
+	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#98c379")).Bold(true)
 )
 
 func colorFor(verdict string) color.Color {
@@ -49,16 +52,41 @@ func label(verdict string) string {
 	return strings.ReplaceAll(verdict, "_", " ")
 }
 
-// resultsView renders the analysis as a visual cost breakdown: a proportion bar
-// + verdict tally up top, then one card per expensive sub-expression (sorted
-// worst-first) with the offending selector and the reasons it's costly.
+// contentWidth is the usable text width inside the doc margins, derived from the
+// last known terminal size (falling back to a sane default before the first
+// WindowSizeMsg arrives).
+func (m model) contentWidth() int {
+	w := m.width
+	if w == 0 {
+		w = 80
+	}
+	w -= 6 // docStyle horizontal margins + a little breathing room
+	if w > 100 {
+		w = 100
+	}
+	if w < 24 {
+		w = 24
+	}
+	return w
+}
+
+// resultsView renders the analysis: the original query with its expensive spans
+// highlighted inline, a proportional cost bar, then one card per problematic
+// sub-expression (worst-first) explaining why it's costly.
 func (m model) resultsView() string {
 	if m.results == nil {
 		return ""
 	}
 	r := m.results
+	w := m.contentWidth()
 
 	var b strings.Builder
+
+	b.WriteString(headStyle.Render("Query"))
+	b.WriteString("\n")
+	b.WriteString(highlightQuery(r.Query, r.Findings, w))
+	b.WriteString("\n\n")
+
 	b.WriteString(headStyle.Render("Cost breakdown"))
 	b.WriteString("\n")
 	b.WriteString(summaryBar(r.Summary))
@@ -76,7 +104,7 @@ func (m model) resultsView() string {
 		if len(f.Codes) == 0 {
 			continue
 		}
-		b.WriteString(renderFinding(f))
+		b.WriteString(renderFinding(f, w))
 		b.WriteString("\n")
 		shown++
 	}
@@ -86,6 +114,60 @@ func (m model) resultsView() string {
 	}
 
 	return docStyle.Render(b.String())
+}
+
+// highlightQuery echoes the query back with the spans of any problematic
+// selector colored + underlined in its verdict color. Because the API gives us
+// selector text rather than offsets, each problematic selector is located by
+// substring; when spans overlap, the higher-severity verdict wins.
+func highlightQuery(query string, findings []Finding, width int) string {
+	if query == "" {
+		return dimStyle.Render("(empty)")
+	}
+
+	sev := make([]int, len(query))
+	verd := make([]string, len(query))
+	for _, f := range findings {
+		if len(f.Codes) == 0 || f.Selector == "" {
+			continue
+		}
+		s := verdictSeverity[f.Verdict]
+		from := 0
+		for {
+			i := strings.Index(query[from:], f.Selector)
+			if i < 0 {
+				break
+			}
+			start := from + i
+			end := start + len(f.Selector)
+			for j := start; j < end; j++ {
+				if s > sev[j] {
+					sev[j] = s
+					verd[j] = f.Verdict
+				}
+			}
+			from = start + 1 // keep searching for further occurrences
+		}
+	}
+
+	var b strings.Builder
+	for i := 0; i < len(query); {
+		j := i
+		for j < len(query) && sev[j] == sev[i] && verd[j] == verd[i] {
+			j++
+		}
+		seg := query[i:j]
+		if sev[i] == 0 {
+			b.WriteString(plainStyle.Render(seg))
+		} else {
+			b.WriteString(lipgloss.NewStyle().
+				Foreground(colorFor(verd[i])).Bold(true).Underline(true).
+				Render(seg))
+		}
+		i = j
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(b.String())
 }
 
 // summaryBar is a stacked proportional bar (one colored segment per verdict)
@@ -123,7 +205,7 @@ func summaryBar(summary map[string]int) string {
 
 // renderFinding draws one selector as a card with a colored left spine matching
 // its verdict, the selector itself, and a bulleted list of reason codes.
-func renderFinding(f Finding) string {
+func renderFinding(f Finding, width int) string {
 	color := colorFor(f.Verdict)
 
 	badge := lipgloss.NewStyle().Foreground(color).Bold(true).
@@ -144,5 +226,56 @@ func renderFinding(f Finding) string {
 		BorderLeft(true).
 		BorderForeground(color).
 		PaddingLeft(1).
+		Width(width).
 		Render(strings.Join(lines, "\n"))
+}
+
+// errorView renders a query/analysis failure as a bordered red box with a
+// human title derived from the error kind, instead of dumping a raw Go error.
+func (m model) errorView() string {
+	if m.err == nil {
+		return ""
+	}
+	w := m.contentWidth()
+
+	title := "Request failed"
+	msg := m.err.Error()
+
+	var apiErr *APIError
+	switch {
+	case errors.As(m.err, &apiErr):
+		switch {
+		case apiErr.StatusCode == 400:
+			title = "Empty query"
+			msg = apiErr.Message
+		case apiErr.StatusCode == 422:
+			title = "Could not analyze query"
+			// The 422 body repeats the title; drop the redundant prefix.
+			msg = strings.TrimPrefix(apiErr.Message, "could not analyze query: ")
+		case apiErr.StatusCode >= 500:
+			title = fmt.Sprintf("pedantic.run server error (%d)", apiErr.StatusCode)
+			// The server-side detail (e.g. "Internal Server Error") is noise;
+			// tell the user what to actually do.
+			msg = "The server failed to analyze this query. Try again — if it keeps happening, it's a bug worth reporting."
+		default:
+			title = fmt.Sprintf("Request failed (%d)", apiErr.StatusCode)
+			msg = apiErr.Message
+		}
+	case errors.Is(m.err, context.DeadlineExceeded):
+		title = "Request timed out"
+		msg = "pedantic.run did not respond in time. Check your connection and try again."
+	}
+
+	red := lipgloss.Color("#f14c4c")
+	content := lipgloss.NewStyle().Foreground(red).Bold(true).Render("✗ "+title) +
+		"\n" + descStyle.Render(msg)
+
+	return docStyle.Render(
+		lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(red).
+			Padding(0, 1).
+			Width(w).
+			Render(content),
+	)
 }
