@@ -97,6 +97,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+enter":
 			return m, runQueryCommand(m.textarea.Value())
+		case "ctrl+backspace":
+			m.textarea.SetValue("")
+			return m, nil
 		case "ctrl+c":
 			return m, tea.Quit
 		}
