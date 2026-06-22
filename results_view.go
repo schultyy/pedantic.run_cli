@@ -40,6 +40,51 @@ var (
 	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#98c379")).Bold(true)
 )
 
+// Tab bar styling: the active tab is bright and underlined in the accent color;
+// inactive tabs are dim with a faint rule, so the row reads as a row of tabs
+// sitting on top of the editor.
+var (
+	tabAccent      = lipgloss.Color("#61afef")
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(tabAccent).
+			Padding(0, 2).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(tabAccent)
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#7f7f7f")).
+				Padding(0, 2).
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderBottom(true).
+				BorderForeground(lipgloss.Color("#3a3a3a"))
+)
+
+// renderTabs draws the tab row: one styled label per tab, joined left-to-right
+// and aligned along their bottom border.
+func (m model) renderTabs() string {
+	segs := make([]string, len(m.tabs))
+	for i, t := range m.tabs {
+		style := inactiveTabStyle
+		if i == m.active {
+			style = activeTabStyle
+		}
+		segs[i] = style.Render(t.title)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Bottom, segs...)
+}
+
+// resultsView renders the active tab's analysis using the renderer for its
+// language.
+func (m model) resultsView(t tab) string {
+	switch t.lang {
+	case langDataPrime:
+		return m.dataPrimeResultsView(t.dp)
+	default:
+		return m.promResultsView(t.prom)
+	}
+}
+
 func colorFor(verdict string) color.Color {
 	if hex, ok := verdictColor[verdict]; ok {
 		return lipgloss.Color(hex)
@@ -70,14 +115,13 @@ func (m model) contentWidth() int {
 	return w
 }
 
-// resultsView renders the analysis: the original query with its expensive spans
-// highlighted inline, a proportional cost bar, then one card per problematic
-// sub-expression (worst-first) explaining why it's costly.
-func (m model) resultsView() string {
-	if m.results == nil {
+// promResultsView renders the PromQL analysis: the original query with its
+// expensive spans highlighted inline, a proportional cost bar, then one card
+// per problematic sub-expression (worst-first) explaining why it's costly.
+func (m model) promResultsView(r *PromQLResults) string {
+	if r == nil {
 		return ""
 	}
-	r := m.results
 	w := m.contentWidth()
 
 	var b strings.Builder
@@ -114,6 +158,75 @@ func (m model) resultsView() string {
 	}
 
 	return docStyle.Render(b.String())
+}
+
+// dataPrimeResultsView renders the DataPrime analysis. DataPrime gives us no
+// selector offsets to highlight inline, so instead of underlining spans we echo
+// the query plainly and lean on the per-stage finding cards below it.
+func (m model) dataPrimeResultsView(r *DataPrimeResults) string {
+	if r == nil {
+		return ""
+	}
+	w := m.contentWidth()
+
+	var b strings.Builder
+
+	b.WriteString(headStyle.Render("Query"))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Width(w).Render(plainStyle.Render(r.Query)))
+	b.WriteString("\n\n")
+
+	b.WriteString(headStyle.Render("Cost breakdown"))
+	b.WriteString("\n")
+	b.WriteString(summaryBar(r.Summary))
+	b.WriteString("\n\n")
+
+	findings := append([]DataPrimeFinding(nil), r.Findings...)
+	sort.SliceStable(findings, func(i, j int) bool {
+		return verdictSeverity[findings[i].Verdict] > verdictSeverity[findings[j].Verdict]
+	})
+
+	if len(findings) == 0 {
+		b.WriteString(okStyle.Render("✓ Nothing expensive — query looks clean."))
+		return docStyle.Render(b.String())
+	}
+
+	for _, f := range findings {
+		b.WriteString(renderDataPrimeFinding(f, w))
+		b.WriteString("\n")
+	}
+
+	return docStyle.Render(b.String())
+}
+
+// renderDataPrimeFinding draws one finding as a card with a colored left spine:
+// the verdict + the stage it fired on, the offending detail, then the single
+// reason code and its explanation.
+func renderDataPrimeFinding(f DataPrimeFinding, width int) string {
+	color := colorFor(f.Verdict)
+
+	badge := lipgloss.NewStyle().Foreground(color).Bold(true).
+		Render(strings.ToUpper(label(f.Verdict)))
+	header := badge + dimStyle.Render("  ·  "+f.Stage+" stage")
+
+	lines := []string{header}
+	if f.Detail != "" {
+		lines = append(lines, codeStyle.Render(f.Detail))
+	}
+
+	title := lipgloss.NewStyle().Foreground(color).Render("• " + f.Code.Title)
+	lines = append(lines, title+dimStyle.Render("  ("+f.Code.Code+")"))
+	if f.Code.Description != "" {
+		lines = append(lines, descStyle.Render("  "+f.Code.Description))
+	}
+
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderLeft(true).
+		BorderForeground(color).
+		PaddingLeft(1).
+		Width(width).
+		Render(strings.Join(lines, "\n"))
 }
 
 // highlightQuery echoes the query back with the spans of any problematic
@@ -232,18 +345,18 @@ func renderFinding(f Finding, width int) string {
 
 // errorView renders a query/analysis failure as a bordered red box with a
 // human title derived from the error kind, instead of dumping a raw Go error.
-func (m model) errorView() string {
-	if m.err == nil {
+func (m model) errorView(err error) string {
+	if err == nil {
 		return ""
 	}
 	w := m.contentWidth()
 
 	title := "Request failed"
-	msg := m.err.Error()
+	msg := err.Error()
 
 	var apiErr *APIError
 	switch {
-	case errors.As(m.err, &apiErr):
+	case errors.As(err, &apiErr):
 		switch {
 		case apiErr.StatusCode == 400:
 			title = "Empty query"
@@ -261,7 +374,7 @@ func (m model) errorView() string {
 			title = fmt.Sprintf("Request failed (%d)", apiErr.StatusCode)
 			msg = apiErr.Message
 		}
-	case errors.Is(m.err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded):
 		title = "Request timed out"
 		msg = "pedantic.run did not respond in time. Check your connection and try again."
 	}

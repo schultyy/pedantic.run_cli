@@ -27,8 +27,8 @@ func TestRenderExpensiveQueries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query %q failed: %v", q, err)
 		}
-		m := model{results: res, width: 90}
-		t.Logf("\n=== %s ===\n%s", q, m.resultsView())
+		m := model{width: 90}
+		t.Logf("\n=== %s ===\n%s", q, m.promResultsView(res))
 	}
 }
 
@@ -45,6 +45,6 @@ func TestRenderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an invalid query")
 	}
-	m := model{err: err, width: 90}
-	t.Logf("\nerr type: %T\n%s", err, m.errorView())
+	m := model{width: 90}
+	t.Logf("\nerr type: %T\n%s", err, m.errorView(err))
 }

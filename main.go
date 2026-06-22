@@ -33,16 +33,61 @@ func main() {
 	}
 }
 
-type model struct {
+// language is the query language a tab analyzes. PromQL and DataPrime are
+// different enough — selectors vs. pipeline stages — that each gets its own
+// tab, editor, and results renderer rather than a shared, lowest-common screen.
+type language int
+
+const (
+	langPromQL language = iota
+	langDataPrime
+)
+
+// tab is one query language's full state: its editor and the latest analysis
+// (or error) for whatever's in that editor. Each tab keeps its own content, so
+// switching languages never clobbers the other's query or results.
+type tab struct {
+	lang     language
+	title    string
 	textarea textarea.Model
-	results  *PromQLResults
-	err      error
-	width    int
+
+	// Exactly one of prom/dp is ever populated, per lang; err is set instead
+	// when the last run failed.
+	prom *PromQLResults
+	dp   *DataPrimeResults
+	err  error
+}
+
+type model struct {
+	tabs   []tab
+	active int
+	width  int
 }
 
 func initialModel() model {
+	prom := newEditor(`up{host="foo"}`)
+	prom.Focus() // the active tab starts focused; any other stays blurred
+
+	tabs := []tab{
+		{lang: langPromQL, title: "PromQL", textarea: prom},
+	}
+
+	// DataPrime is gated behind a compile-time feature flag (see features.go):
+	// released builds ship with it off, so the tab only exists when the embedded
+	// features.json turns it on.
+	if features.DataPrime {
+		dp := newEditor(`source logs | groupby path aggregate count()`)
+		tabs = append(tabs, tab{lang: langDataPrime, title: "DataPrime", textarea: dp})
+	}
+
+	return model{tabs: tabs}
+}
+
+// newEditor builds a textarea configured the way both tabs want it, differing
+// only in placeholder.
+func newEditor(placeholder string) textarea.Model {
 	ti := textarea.New()
-	ti.Placeholder = "up{host=\"foo\"}"
+	ti.Placeholder = placeholder
 	ti.ShowLineNumbers = true
 	ti.DynamicHeight = true
 	ti.MinHeight = 3
@@ -50,91 +95,135 @@ func initialModel() model {
 	ti.MaxContentHeight = 20
 	ti.SetWidth(1000)
 	ti.SetVirtualCursor(false)
-	ti.Focus()
-
-	return model{textarea: ti}
+	return ti
 }
 
+// queryResultMsg carries an analysis back to the tab that requested it. `tab`
+// is the index that ran the query, so a result still lands on the right tab
+// even if the user switched tabs while the request was in flight.
 type queryResultMsg struct {
-	results *PromQLResults
-	err     error
+	tab  int
+	prom *PromQLResults
+	dp   *DataPrimeResults
+	err  error
 }
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, tea.RequestBackgroundColor)
 }
 
-func runQueryCommand(query string) tea.Cmd {
+// runQueryCommand dispatches to the right client for the tab's language. The
+// tab index and language are captured up front so the result is routed back
+// correctly regardless of what's focused when it returns.
+func runQueryCommand(idx int, lang language, query string) tea.Cmd {
 	return func() tea.Msg {
-		if query == "" {
-			return queryResultMsg{results: nil, err: nil}
+		if strings.TrimSpace(query) == "" {
+			return queryResultMsg{tab: idx}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		results, err := RunPromQl(ctx, query)
-		return queryResultMsg{results: results, err: err}
+
+		switch lang {
+		case langDataPrime:
+			res, err := RunDataPrime(ctx, query)
+			return queryResultMsg{tab: idx, dp: res, err: err}
+		default:
+			res, err := RunPromQl(ctx, query)
+			return queryResultMsg{tab: idx, prom: res, err: err}
+		}
 	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	var cmd tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 	case tea.BackgroundColorMsg:
-		m.textarea.SetStyles(textarea.DefaultStyles(msg.IsDark()))
+		styles := textarea.DefaultStyles(msg.IsDark())
+		for i := range m.tabs {
+			m.tabs[i].textarea.SetStyles(styles)
+		}
 	case queryResultMsg:
-		// Check the error before touching results — on the error path
-		// results is nil.
+		t := &m.tabs[msg.tab]
+		// Check the error before touching results — on the error path both
+		// result pointers are nil.
 		if msg.err != nil {
-			m.err = msg.err
-			m.results = nil
+			t.err, t.prom, t.dp = msg.err, nil, nil
 		} else {
-			m.err = nil
-			m.results = msg.results
+			t.err, t.prom, t.dp = nil, msg.prom, msg.dp
 		}
 		return m, nil
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "ctrl+enter":
-			return m, runQueryCommand(m.textarea.Value())
-		case "ctrl+backspace":
-			m.textarea.SetValue("")
-			return m, nil
 		case "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			return m, m.switchTab(1)
+		case "shift+tab":
+			return m, m.switchTab(-1)
+		case "ctrl+enter":
+			t := m.tabs[m.active]
+			return m, runQueryCommand(m.active, t.lang, t.textarea.Value())
+		case "ctrl+backspace":
+			m.tabs[m.active].textarea.SetValue("")
+			return m, nil
 		}
 	}
 
-	m.textarea, cmd = m.textarea.Update(msg)
-	cmds = append(cmds, cmd)
-	return m, tea.Batch(cmds...)
+	// Everything else (typing, cursor moves, blink) goes to the focused editor.
+	var cmd tea.Cmd
+	m.tabs[m.active].textarea, cmd = m.tabs[m.active].textarea.Update(msg)
+	return m, cmd
+}
+
+// switchTab moves focus by `delta` tabs (wrapping), blurring the old editor and
+// focusing the new one so only the visible tab shows a cursor.
+func (m *model) switchTab(delta int) tea.Cmd {
+	m.tabs[m.active].textarea.Blur()
+	n := len(m.tabs)
+	m.active = (m.active + delta%n + n) % n
+	return m.tabs[m.active].textarea.Focus()
 }
 
 func (m model) View() tea.View {
-	const gap = 1
+	active := m.tabs[m.active]
 
-	var c *tea.Cursor
-	if !m.textarea.VirtualCursor() {
-		c = m.textarea.Cursor()
-		c.Y += gap
+	// Everything above the editor; its rendered height tells us how far down to
+	// push the cursor (one row per newline before the editor begins). With a
+	// single tab there's nothing to switch between, so we skip the tab bar.
+	prefix := "\n"
+	if len(m.tabs) > 1 {
+		prefix += m.renderTabs() + "\n"
 	}
 
-	sections := []string{
-		m.textarea.View(),
-	}
-	if m.err != nil {
-		sections = append(sections, m.errorView())
-	} else if res := m.resultsView(); res != "" {
+	sections := []string{active.textarea.View()}
+	if active.err != nil {
+		sections = append(sections, m.errorView(active.err))
+	} else if res := m.resultsView(active); res != "" {
 		sections = append(sections, res)
 	}
-	sections = append(sections, "\n(ctrl+enter to run · ctrl+backspace to reset editor · ctrl+c to quit)")
+	sections = append(sections, "\n"+m.footer())
 
-	f := strings.Repeat("\n", gap) + strings.Join(sections, "\n")
+	f := prefix + strings.Join(sections, "\n")
+
+	var c *tea.Cursor
+	if !active.textarea.VirtualCursor() {
+		c = active.textarea.Cursor()
+		c.Y += strings.Count(prefix, "\n")
+	}
 
 	v := tea.NewView(f)
 	v.Cursor = c
 	return v
+}
+
+// footer lists the active keybindings. The language-switch hint only appears
+// when there's more than one tab to switch between.
+func (m model) footer() string {
+	hints := []string{"ctrl+enter to run"}
+	if len(m.tabs) > 1 {
+		hints = append(hints, "tab to switch language")
+	}
+	hints = append(hints, "ctrl+backspace to reset editor", "ctrl+c to quit")
+	return "(" + strings.Join(hints, " · ") + ")"
 }
