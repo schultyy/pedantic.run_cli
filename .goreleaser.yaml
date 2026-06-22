@@ -1,0 +1,51 @@
+# GoReleaser config — https://goreleaser.com
+# Cross-compiles the CLI and publishes archives + checksums to GitHub Releases.
+version: 2
+
+project_name: pedantic-run-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pedantic
+    binary: pedantic
+    main: .
+    env:
+      # Pure-Go build so we can cross-compile darwin from the Linux runner.
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  draft: false
+  # Tags like v1.2.3-rc1 are published as pre-releases automatically.
+  prerelease: auto
