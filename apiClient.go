@@ -12,14 +12,20 @@ import (
 	"time"
 )
 
-// promQLURL and dataPrimeURL are the pedantic.run analysis endpoints. The two
-// query languages have different request semantics and response shapes, so each
-// has its own typed client (RunPromQl / RunDataPrime) over the shared transport
-// in postAnalyze.
-const (
-	promQLURL    = "https://pedantic.run/api/promql/analyze"
-	dataPrimeURL = "https://pedantic.run/api/dataprime/analyze"
-)
+// defaultBaseHost is the production pedantic.run origin. Override it with the
+// --host flag (see main.go) to point the CLI at a local or staging server.
+const defaultBaseHost = "https://pedantic.run"
+
+// baseHost is the origin every analyze request targets. It defaults to
+// production and is overwritten once at startup from the --host flag.
+var baseHost = defaultBaseHost
+
+// promQLURL and dataPrimeURL build the analysis endpoints from the current
+// baseHost. The two query languages have different request semantics and
+// response shapes, so each has its own typed client (RunPromQl / RunDataPrime)
+// over the shared transport in postAnalyze.
+func promQLURL() string    { return baseHost + "/api/promql/analyze" }
+func dataPrimeURL() string { return baseHost + "/api/dataprime/analyze" }
 
 // userAgent identifies this CLI (and its version) to the backend so requests
 // from the TUI can be distinguished from the web app and other clients.
@@ -107,7 +113,7 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 // analysis. A non-2xx response comes back as *APIError.
 func RunPromQl(ctx context.Context, query string) (*PromQLResults, error) {
 	var out PromQLResults
-	if err := postAnalyze(ctx, promQLURL, query, &out); err != nil {
+	if err := postAnalyze(ctx, promQLURL(), query, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

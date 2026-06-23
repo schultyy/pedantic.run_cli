@@ -30,7 +30,7 @@ type DataPrimeFinding struct {
 // analysis. A non-2xx response comes back as *APIError.
 func RunDataPrime(ctx context.Context, query string) (*DataPrimeResults, error) {
 	var out DataPrimeResults
-	if err := postAnalyze(ctx, dataPrimeURL, query, &out); err != nil {
+	if err := postAnalyze(ctx, dataPrimeURL(), query, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

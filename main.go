@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -19,18 +21,48 @@ var docStyle = lipgloss.NewStyle().Margin(1, 2)
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--version", "-v", "version":
-			fmt.Println("pedantic", version)
-			return
-		}
+	host := flag.String("host", defaultBaseHost, "Base host for the pedantic.run API, e.g. http://localhost:4000")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.BoolVar(showVersion, "v", false, "Print version and exit (shorthand)")
+	flag.Parse()
+
+	// Keep the existing `pedantic version` subcommand working alongside the
+	// --version / -v flags.
+	if *showVersion || flag.Arg(0) == "version" {
+		fmt.Println("pedantic", version)
+		return
 	}
+
+	normalized, err := normalizeHost(*host)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid --host:", err)
+		os.Exit(2)
+	}
+	baseHost = normalized
 
 	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// normalizeHost validates a --host override and strips any trailing slash so it
+// joins cleanly with the endpoint paths. It requires an http/https scheme and a
+// host, so a typo fails fast with a clear message instead of surfacing later as
+// a confusing request error.
+func normalizeHost(h string) (string, error) {
+	h = strings.TrimRight(strings.TrimSpace(h), "/")
+	u, err := url.Parse(h)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("must start with http:// or https:// (got %q)", h)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("missing host (got %q)", h)
+	}
+	return h, nil
 }
 
 // language is the query language a tab analyzes. PromQL and DataPrime are
