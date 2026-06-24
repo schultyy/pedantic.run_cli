@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -24,6 +25,10 @@ func main() {
 	host := flag.String("host", defaultBaseHost, "Base host for the pedantic.run API, e.g. http://localhost:4000")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.BoolVar(showVersion, "v", false, "Print version and exit (shorthand)")
+	promqlQuery := flag.String("promql", "", "Run a PromQL query non-interactively and exit")
+	dataPrimeQuery := flag.String("dataprime", "", "Run a DataPrime query non-interactively and exit")
+	outputMode := flag.String("output", "agents", "Output format for non-interactive mode: agents or json")
+	flag.StringVar(outputMode, "o", "agents", "Output format shorthand")
 	flag.Parse()
 
 	// Keep the existing `pedantic version` subcommand working alongside the
@@ -40,9 +45,70 @@ func main() {
 	}
 	baseHost = normalized
 
+	if *promqlQuery != "" || *dataPrimeQuery != "" {
+		runNonInteractive(*promqlQuery, *dataPrimeQuery, *outputMode)
+		return
+	}
+
 	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func runNonInteractive(promqlQuery, dataPrimeQuery, outputMode string) {
+	if promqlQuery != "" && dataPrimeQuery != "" {
+		fmt.Fprintln(os.Stderr, "cannot use --promql and --dataprime together")
+		os.Exit(2)
+	}
+	if outputMode != "json" && outputMode != "agents" {
+		fmt.Fprintf(os.Stderr, "invalid --output value %q: must be json or agents\n", outputMode)
+		os.Exit(2)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var promRes *PromQLResults
+	var dpRes *DataPrimeResults
+	var runErr error
+
+	if promqlQuery != "" {
+		promRes, runErr = RunPromQl(ctx, promqlQuery)
+	} else {
+		if !features.DataPrime {
+			fmt.Fprintln(os.Stderr, "--dataprime is not available in this build")
+			os.Exit(2)
+		}
+		dpRes, runErr = RunDataPrime(ctx, dataPrimeQuery)
+	}
+
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, runErr)
+		os.Exit(1)
+	}
+
+	switch outputMode {
+	case "json":
+		var v any
+		if promRes != nil {
+			v = promRes
+		} else {
+			v = dpRes
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(v); err != nil {
+			fmt.Fprintln(os.Stderr, "encoding JSON:", err)
+			os.Exit(1)
+		}
+	default: // agents
+		m := model{width: 100}
+		if promRes != nil {
+			fmt.Println(m.promResultsView(promRes))
+		} else {
+			fmt.Println(m.dataPrimeResultsView(dpRes))
+		}
 	}
 }
 
