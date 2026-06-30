@@ -238,49 +238,15 @@ func highlightQuery(query string, findings []Finding, width int) string {
 		return dimStyle.Render("(empty)")
 	}
 
-	sev := make([]int, len(query))
-	verd := make([]string, len(query))
+	var spans []HighlightSpan
 	for _, f := range findings {
 		if len(f.Codes) == 0 || f.Selector == "" {
 			continue
 		}
-		s := verdictSeverity[f.Verdict]
-		from := 0
-		for {
-			i := strings.Index(query[from:], f.Selector)
-			if i < 0 {
-				break
-			}
-			start := from + i
-			end := start + len(f.Selector)
-			for j := start; j < end; j++ {
-				if s > sev[j] {
-					sev[j] = s
-					verd[j] = f.Verdict
-				}
-			}
-			from = start + 1 // keep searching for further occurrences
-		}
+		spans = append(spans, HighlightSpan{Text: f.Selector, Verdict: f.Verdict})
 	}
 
-	var b strings.Builder
-	for i := 0; i < len(query); {
-		j := i
-		for j < len(query) && sev[j] == sev[i] && verd[j] == verd[i] {
-			j++
-		}
-		seg := query[i:j]
-		if sev[i] == 0 {
-			b.WriteString(plainStyle.Render(seg))
-		} else {
-			b.WriteString(lipgloss.NewStyle().
-				Foreground(colorFor(verd[i])).Bold(true).Underline(true).
-				Render(seg))
-		}
-		i = j
-	}
-
-	return lipgloss.NewStyle().Width(width).Render(b.String())
+	return lipgloss.NewStyle().Width(width).Render(highlightFragment(query, spans, plainStyle))
 }
 
 // summaryBar is a stacked proportional bar (one colored segment per verdict)
